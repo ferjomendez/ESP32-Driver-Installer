@@ -111,9 +111,10 @@ Ejemplo de salida exitosa:
 
 ```
 ╔══════════════════════════════════════════════════════════════════════╗
-║  ESP32 DRIVER INSTALLER v1.0.0                                     ║
-║  Silicon Labs CP210x USB to UART Bridge VCP Driver                 ║
-║  2026-08-24 15:30:00  |  MI-PC  |  PowerShell 5.1.22621.4391      ║
+║  ESP32 DRIVER INSTALLER v1.0.0                                      ║
+║  Silicon Labs CP210x USB to UART Bridge VCP Driver                   ║
+║  2026-08-24 15:30:00  |  MI-PC  |  PS 5.1                           ║
+║  github.com/ferjomendez                                              ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
   [1/5] Checking privileges
@@ -140,9 +141,11 @@ Ejemplo de salida exitosa:
   Temporary files removed.
 
 ╔══════════════════════════════════════════════════════════════════════╗
-║  INSTALLATION COMPLETE                                             ║
-║  Time: 8.3s                                                        ║
+║  INSTALLATION COMPLETE                                               ║
+║  Time: 8.3s                                                          ║
 ╚══════════════════════════════════════════════════════════════════════╝
+
+  Press any key to close ...
 ```
 
 ---
