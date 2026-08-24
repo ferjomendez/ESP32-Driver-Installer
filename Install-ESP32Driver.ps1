@@ -129,14 +129,7 @@ function Wait-Exit {
     <# Pauses before exit so the user can read the output. #>
     Out-Line ''
     Out-Line '  Press any key to close ...' DarkGray
-    try {
-        if ($Host.UI.RawUI.KeyAvailable -ne $null) {
-            $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
-        }
-    } catch {
-        # Fallback for hosts without RawUI (e.g. ISE, pipeline).
-        Read-Host '  Press Enter to close'
-    }
+    cmd /c pause >$null 2>&1
 }
 
 # ============================================================================
