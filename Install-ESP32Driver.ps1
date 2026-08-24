@@ -125,6 +125,20 @@ function Invoke-Safe {
     try { & $Script } catch { $Default }
 }
 
+function Wait-Exit {
+    <# Pauses before exit so the user can read the output. #>
+    Out-Line ''
+    Out-Line '  Press any key to close ...' DarkGray
+    try {
+        if ($Host.UI.RawUI.KeyAvailable -ne $null) {
+            $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+        }
+    } catch {
+        # Fallback for hosts without RawUI (e.g. ISE, pipeline).
+        Read-Host '  Press Enter to close'
+    }
+}
+
 # ============================================================================
 #  Console output pipeline
 # ============================================================================
@@ -367,6 +381,7 @@ function Invoke-ESP32DriverInstaller {
         Out-Status 'This script requires Administrator privileges to install drivers.' Red
         Out-Status 'Right-click PowerShell and select "Run as administrator", then try again.' Yellow
         $stopwatch.Stop()
+        Wait-Exit
         exit 1
     }
     Out-Status 'Running as Administrator.' Green
@@ -393,7 +408,7 @@ function Invoke-ESP32DriverInstaller {
         $stopwatch.Stop()
         Out-Line ''
         Out-Line "  Completed in $([math]::Round($stopwatch.Elapsed.TotalSeconds, 1))s" DarkGray
-        Out-Line ''
+        Wait-Exit
         exit 0
     }
 
@@ -414,6 +429,7 @@ function Invoke-ESP32DriverInstaller {
         Out-Status 'Check your internet connection or download manually from:' Yellow
         Out-Status 'https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers' Yellow
         Remove-TempFiles
+        Wait-Exit
         exit 1
     }
 
@@ -423,6 +439,7 @@ function Invoke-ESP32DriverInstaller {
     $extractPath = Expand-DriverPackage
     if (-not $extractPath) {
         Remove-TempFiles
+        Wait-Exit
         exit 1
     }
 
@@ -438,6 +455,7 @@ function Invoke-ESP32DriverInstaller {
             Out-Status ''
             Out-Status 'Keeping temp files for manual install.' Yellow
         }
+        Wait-Exit
         exit 1
     }
 
@@ -482,10 +500,12 @@ function Invoke-ESP32DriverInstaller {
 
 try {
     Invoke-ESP32DriverInstaller
+    Wait-Exit
     exit 0
 } catch {
     Write-Host ''
     Write-Host "ESP32 Driver Installer encountered an unexpected error: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    Wait-Exit
     exit 1
 }
