@@ -360,11 +360,24 @@ function Invoke-ESP32DriverInstaller {
     $banner = 'ESP32 DRIVER INSTALLER v' + $Script:Version
     $sub    = 'Silicon Labs CP210x USB to UART Bridge VCP Driver'
     $inner  = 66
+
+    # Build info line, trimming PowerShell version if needed.
+    $psVer    = "$($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)"
+    $infoLine = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  |  ' + $env:COMPUTERNAME + '  |  PS ' + $psVer
+    $authorLine = 'github.com/ferjomendez'
+
     Out-Line ''
     Out-Line ($Script:G.TL + ($Script:G.H * $inner) + $Script:G.TR) Cyan
-    Out-Line ($Script:G.V + ('  ' + $banner).PadRight($inner) + $Script:G.V) Cyan
-    Out-Line ($Script:G.V + ('  ' + $sub).PadRight($inner) + $Script:G.V) DarkCyan
-    Out-Line ($Script:G.V + ('  ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  |  ' + $env:COMPUTERNAME + '  |  PowerShell ' + $PSVersionTable.PSVersion).PadRight($inner) + $Script:G.V) DarkCyan
+    foreach ($entry in @(
+        @{ Text = $banner;    Color = 'Cyan' },
+        @{ Text = $sub;       Color = 'DarkCyan' },
+        @{ Text = $infoLine;  Color = 'DarkCyan' },
+        @{ Text = $authorLine; Color = 'DarkCyan' }
+    )) {
+        $padded = '  ' + $entry.Text
+        if ($padded.Length -gt $inner) { $padded = $padded.Substring(0, $inner) }
+        Out-Line ($Script:G.V + $padded.PadRight($inner) + $Script:G.V) $entry.Color
+    }
     Out-Line ($Script:G.BL + ($Script:G.H * $inner) + $Script:G.BR) Cyan
 
     # ---- Step 1: Admin check ------------------------------------------------
