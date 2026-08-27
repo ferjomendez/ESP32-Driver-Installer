@@ -414,6 +414,116 @@ function Get-CP210xComPorts {
 }
 
 # ============================================================================
+#  Other USB-to-UART bridges
+#
+#  Not every ESP32 board uses a Silicon Labs chip. Boards built around WCH
+#  (CH340 / CH9102), FTDI, or the native USB peripheral of the ESP32-S2/S3/C3
+#  will never bind to the CP210x driver. Saying "no ESP32 connected" in that
+#  case is misleading: the board is plugged in and usually already working.
+# ============================================================================
+
+function Get-UsbUartVendorInfo {
+    <#
+        Identifies the USB-to-UART bridge behind a PnP device id, or returns
+        $null when the device is not a known bridge.
+    #>
+    param([string]$DeviceID)
+
+    if ([string]::IsNullOrWhiteSpace($DeviceID)) { return $null }
+
+    # Deliberately requires the "VID_" form. Bluetooth device ids carry a
+    # different "_VID&nnnn" field that must not be treated as a USB vendor id.
+    if ($DeviceID -notmatch '(?i)VID_([0-9A-F]{4})') { return $null }
+
+    $vid = $Matches[1].ToUpperInvariant()
+    $vendor = switch ($vid) {
+        '10C4'  { 'Silicon Labs' }
+        '1A86'  { 'WCH' }
+        '0403'  { 'FTDI' }
+        '303A'  { 'Espressif' }
+        default { $null }
+    }
+    if (-not $vendor) { return $null }
+
+    [pscustomobject]@{
+        Vid      = $vid
+        Vendor   = $vendor
+        IsCP210x = ($vid -eq '10C4')
+    }
+}
+
+function Get-OtherUsbUartPorts {
+    <#
+        Given a set of PnP entities, returns the connected USB-to-UART bridges
+        that are NOT CP210x devices, with the COM port each one holds.
+    #>
+    param($Entities)
+
+    $result = New-Object System.Collections.ArrayList
+    foreach ($e in @($Entities)) {
+        if (-not $e) { continue }
+
+        $info = Get-UsbUartVendorInfo -DeviceID $e.DeviceID
+        if (-not $info -or $info.IsCP210x) { continue }
+
+        # No (COMx) suffix means Windows has not assigned a port yet.
+        if ($e.Name -match '\((COM\d+)\)') {
+            [void]$result.Add([pscustomobject]@{
+                Name   = $e.Name
+                Port   = $Matches[1]
+                Vid    = $info.Vid
+                Vendor = $info.Vendor
+            })
+        }
+    }
+    return @($result)
+}
+
+function Get-ConnectedUsbUartBridges {
+    <# Queries the live system for connected non-CP210x USB-to-UART bridges. #>
+    $entities = Invoke-Safe { Get-CimInstance Win32_PnPEntity -ErrorAction Stop } @()
+    return @(Get-OtherUsbUartPorts -Entities $entities)
+}
+
+function Out-OtherBridgeHint {
+    <#
+        Prints an explanation when a board is connected through a bridge other
+        than a CP210x. Returns $true if anything was reported.
+    #>
+    $others = @(Get-ConnectedUsbUartBridges)
+    if ($others.Count -eq 0) { return $false }
+
+    Out-Status 'No CP210x device connected.' DarkGray
+    Out-Status 'Found another USB-to-UART bridge instead:' Yellow
+    foreach ($o in $others) {
+        Out-KV 'Device' $o.Name Yellow
+        Out-KV 'Port'   $o.Port Yellow
+        Out-KV 'Vendor' ('{0} (VID_{1}) - not Silicon Labs' -f $o.Vendor, $o.Vid) Yellow
+    }
+
+    Out-Line ''
+    Out-Status 'This board does not use a CP210x chip, so the Silicon Labs' White
+    Out-Status 'driver will not bind to it. It already has a COM port, so you' White
+    Out-Status 'can point your IDE at the port listed above.' White
+
+    foreach ($vendor in ($others | Select-Object -ExpandProperty Vendor -Unique)) {
+        switch ($vendor) {
+            'WCH' {
+                Out-Status 'If it stops working, install the WCH CH340/CH9102 driver from wch.cn.' DarkGray
+            }
+            'FTDI' {
+                Out-Status 'If it stops working, install the FTDI VCP driver from ftdichip.com.' DarkGray
+            }
+            'Espressif' {
+                Out-Status 'This board uses the ESP32 native USB peripheral. No driver is needed.' DarkGray
+            }
+        }
+    }
+
+    return $true
+}
+
+# ============================================================================
 #  Download and install
 # ============================================================================
 
@@ -640,7 +750,7 @@ function Invoke-ESP32DriverInstaller {
         $ports = Get-CP210xComPorts
         if ($ports.Count -gt 0) {
             Out-KV 'ESP32 detected on' ($ports -join ', ') Green
-        } else {
+        } elseif (-not (Out-OtherBridgeHint)) {
             Out-Status 'No CP210x device currently connected (this is normal if unplugged).' DarkGray
         }
 
@@ -724,7 +834,7 @@ function Invoke-ESP32DriverInstaller {
     $ports = Get-CP210xComPorts
     if ($ports.Count -gt 0) {
         Out-KV 'ESP32 detected on' ($ports -join ', ') Green
-    } else {
+    } elseif (-not (Out-OtherBridgeHint)) {
         Out-Status 'No CP210x device currently connected. Plug in your board to verify.' DarkGray
     }
 
