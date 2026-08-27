@@ -1,0 +1,37 @@
+Microsoft PnP Utility
+
+Published Name:     oem52.inf
+Original Name:      acpi0002.inf
+Provider Name:      Microsoft
+Class Name:         System devices
+Class GUID:         {4d36e97d-e325-11ce-bfc1-08002be10318}
+Driver Version:     06/21/2006 10.0.26100.1
+Signer Name:        Microsoft Windows
+
+Published Name:     oem26.inf
+Original Name:      silabser.inf
+Provider Name:      Silicon Laboratories Inc.
+Class Name:         Ports
+Class GUID:         {4d36e978-e325-11ce-bfc1-08002be10318}
+Driver Version:     12/10/2025 11.5.0.417
+Signer Name:        Microsoft Windows Hardware Compatibility Publisher
+Attributes:         Universal
+WHCP Version:       Unknown
+
+Published Name:     oem112.inf
+Original Name:      slabvcp.inf
+Provider Name:      Silicon Laboratories Inc.
+Class Name:         Ports
+Class GUID:         {4d36e978-e325-11ce-bfc1-08002be10318}
+Driver Version:     09/19/2016 6.7.4.261
+Signer Name:        Microsoft Windows Hardware Compatibility Publisher
+Attributes:         Legacy
+WHCP Version:       Unknown
+
+Published Name:     oem7.inf
+Original Name:      nvhda.inf
+Provider Name:      NVIDIA Corporation
+Class Name:         Sound, video and game controllers
+Class GUID:         {4d36e96c-e325-11ce-bfc1-08002be10318}
+Driver Version:     08/01/2024 1.4.4.0
+Signer Name:        Microsoft Windows Hardware Compatibility Publisher

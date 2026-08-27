@@ -14,11 +14,11 @@ Sin el puerto COM, ni Arduino IDE, ni PlatformIO, ni esptool pueden comunicarse 
 
 ## ¿Que hace este script?
 
-1. Verifica que se esta ejecutando con privilegios de Administrador.
-2. Comprueba si el driver CP210x ya esta instalado en el sistema.
+1. Verifica que se esta ejecutando con privilegios de Administrador. Si no los tiene, se relanza solo pidiendo elevacion por UAC.
+2. Comprueba si el driver CP210x ya esta instalado, consultando el driver store de Windows con `pnputil`.
 3. Si no esta instalado (o si se usa el parametro `-Force`), descarga el paquete oficial directamente desde silabs.com.
 4. Extrae el ZIP y ejecuta el instalador silencioso correspondiente a la arquitectura del sistema (x64 o x86).
-5. Si el instalador EXE falla, intenta instalar el driver via `pnputil` usando el archivo INF.
+5. Si el instalador EXE falla, intenta instalar el driver via `pnputil` usando el archivo INF del paquete.
 6. Verifica que el driver quedo registrado correctamente.
 7. Reporta el puerto COM si hay un dispositivo ESP32 conectado.
 8. Limpia los archivos temporales.
@@ -27,7 +27,7 @@ Sin el puerto COM, ni Arduino IDE, ni PlatformIO, ni esptool pueden comunicarse 
 
 - Windows 10 o Windows 11
 - PowerShell 5.1 o superior (incluido en Windows 10/11 por defecto)
-- Privilegios de Administrador (necesario para instalar drivers)
+- Privilegios de Administrador (el script los solicita solo por UAC si hace falta)
 - Conexion a internet (para descargar el paquete de Silicon Labs)
 
 ---
@@ -37,29 +37,35 @@ Sin el puerto COM, ni Arduino IDE, ni PlatformIO, ni esptool pueden comunicarse 
 ### Opcion 1: Descarga y ejecucion manual
 
 1. Descarga `Install-ESP32Driver.ps1` desde este repositorio.
-2. Abre PowerShell como Administrador.
+2. Abre PowerShell.
 3. Navega hasta la carpeta donde descargaste el archivo.
 4. Ejecuta:
 
 ```powershell
+Unblock-File .\Install-ESP32Driver.ps1
 powershell -ExecutionPolicy Bypass -File .\Install-ESP32Driver.ps1
 ```
 
+`Unblock-File` es necesario la primera vez si descargaste el archivo con el navegador: Windows marca los archivos bajados de internet y bloquea su ejecucion. Ver [Solucion de problemas](#solucion-de-problemas).
+
+Si no abriste PowerShell como Administrador, el script mostrara el dialogo de UAC y continuara en una ventana elevada.
+
 ### Opcion 2: One-liner desde la terminal
 
-Abre PowerShell como Administrador y ejecuta:
-
 ```powershell
-&([scriptblock]::Create((irm https://raw.githubusercontent.com/ferjomendez/ESP32-Driver-Installer/main/Install-ESP32Driver.ps1)))
+$s = "$env:TEMP\Install-ESP32Driver.ps1"; irm https://raw.githubusercontent.com/ferjomendez/ESP32-Driver-Installer/main/Install-ESP32Driver.ps1 -OutFile $s; powershell -ExecutionPolicy Bypass -File $s
 ```
 
-Esto descarga y ejecuta el script directamente sin necesidad de guardarlo.
-
-Para forzar reinstalacion desde el one-liner:
+Para forzar reinstalacion, agrega `-Force` al final:
 
 ```powershell
-&([scriptblock]::Create((irm https://raw.githubusercontent.com/ferjomendez/ESP32-Driver-Installer/main/Install-ESP32Driver.ps1))) -Force
+$s = "$env:TEMP\Install-ESP32Driver.ps1"; irm https://raw.githubusercontent.com/ferjomendez/ESP32-Driver-Installer/main/Install-ESP32Driver.ps1 -OutFile $s; powershell -ExecutionPolicy Bypass -File $s -Force
 ```
+
+> **Nota:** el one-liner guarda el script en la carpeta temporal en vez de ejecutarlo desde memoria con
+> `&([scriptblock]::Create(...))`. Ese patron parece mas limpio pero tiene dos problemas reales: el `exit`
+> del script termina **el proceso de PowerShell completo**, cerrandole la ventana al usuario, y ademas deja
+> `$PSCommandPath` vacio, lo que impide que el script pueda relanzarse a si mismo con permisos de Administrador.
 
 ---
 
@@ -75,6 +81,8 @@ Para forzar reinstalacion desde el one-liner:
 Todos los parametros aceptan formato GNU con doble guion: `--force`, `--nocolor`, `--ascii`, `--keep`.
 
 La variable de entorno `NO_COLOR` tambien se respeta para desactivar colores.
+
+Existe ademas un parametro interno `-Elevated`, que el script se pasa a si mismo al relanzarse por UAC para evitar un bucle de elevacion. No es necesario usarlo a mano.
 
 ### Ejemplos
 
@@ -111,7 +119,7 @@ Ejemplo de salida exitosa:
 
 ```
 ╔══════════════════════════════════════════════════════════════════════╗
-║  ESP32 DRIVER INSTALLER v1.0.0                                      ║
+║  ESP32 DRIVER INSTALLER v1.1.0                                      ║
 ║  Silicon Labs CP210x USB to UART Bridge VCP Driver                   ║
 ║  2026-08-24 15:30:00  |  MI-PC  |  PS 5.1                           ║
 ║  github.com/ferjomendez                                              ║
@@ -126,13 +134,16 @@ Ejemplo de salida exitosa:
   [3/5] Downloading driver package
   Downloading from silabs.com ...
   URL                        https://www.silabs.com/documents/public/software/CP210x_Windows_Drivers.zip
-  Downloaded                 3.9 MB
+  Downloaded                 6.8 MB
 
   [4/5] Installing driver
   Installer                  CP210xVCPInstaller_x64.exe
   Architecture               x64
   Running installer (this may take a few seconds) ...
+  Installer result           Success (0x00010100)
   Installer completed successfully.
+  Installed on devices       1
+  Copied to driver store     1
 
   [5/5] Verifying installation
   CP210x driver installed and verified.
@@ -161,17 +172,58 @@ Este driver cubre cualquier dispositivo que use un chip USB-to-UART de la famili
 - SparkFun Thing Plus
 - Wemos Lolin32
 
-Algunas placas usan el chip CH340 en vez del CP210x. Si despues de instalar este driver tu placa sigue sin ser reconocida, es probable que necesites el driver CH340 en su lugar. Puedes verificar el chip revisando la serigrafía de la placa cerca del conector USB.
+### Si tu placa NO usa un CP210x
+
+Muchas placas ESP32 (sobre todo clones y las variantes S2/S3/C3) no llevan chip Silicon Labs. El script lo detecta y te lo dice en vez de limitarse a reportar que no hay nada conectado:
+
+```
+  No CP210x device connected.
+  Found another USB-to-UART bridge instead:
+  Device                     USB-Enhanced-SERIAL CH9102 (COM4)
+  Port                       COM4
+  Vendor                     WCH (VID_1A86) - not Silicon Labs
+
+  This board does not use a CP210x chip, so the Silicon Labs
+  driver will not bind to it. It already has a COM port, so you
+  can point your IDE at the port listed above.
+  If it stops working, install the WCH CH340/CH9102 driver from wch.cn.
+```
+
+Reconoce estos fabricantes por su USB Vendor ID:
+
+| VID | Fabricante | Chips tipicos | Que hacer |
+|-----|-----------|---------------|-----------|
+| `10C4` | Silicon Labs | CP2102, CP2102N, CP2104, CP2105, CP2108 | Este script |
+| `1A86` | WCH | CH340, CH341, CH343, CH9102 | Driver de [wch.cn](https://www.wch-ic.com/downloads/CH341SER_EXE.html) |
+| `0403` | FTDI | FT232R, FT231X | Driver VCP de [ftdichip.com](https://ftdichip.com/drivers/vcp-drivers/) |
+| `303A` | Espressif | USB nativo (S2 / S3 / C3) | Ninguno, Windows lo reconoce solo |
+
+Los puertos COM de Bluetooth se ignoran, porque no corresponden a placas.
+
+Tambien puedes verificar el chip a simple vista revisando la serigrafia de la placa cerca del conector USB.
 
 ---
 
 ## Solucion de problemas
 
+**"No se puede cargar el archivo ... porque la ejecucion de scripts esta deshabilitada" / no pasa nada al hacer doble clic**
+Son las dos caras del mismo problema. Windows marca los archivos descargados de internet (Mark of the Web) y ademas bloquea la ejecucion de scripts por defecto. Solucion:
+
+```powershell
+Unblock-File .\Install-ESP32Driver.ps1
+powershell -ExecutionPolicy Bypass -File .\Install-ESP32Driver.ps1
+```
+
+Usar `-ExecutionPolicy Bypass` en la invocacion afecta solo a ese proceso: no cambia la politica global del sistema.
+
 **"This script requires Administrator privileges"**
-Haz click derecho sobre PowerShell y selecciona "Ejecutar como administrador". El script no puede instalar drivers sin estos permisos.
+Solo aparece si el script no pudo relanzarse elevado (por ejemplo, si cancelaste el dialogo de UAC). Haz click derecho sobre PowerShell, selecciona "Ejecutar como administrador" y vuelve a ejecutarlo.
 
 **La descarga falla**
 Verifica tu conexion a internet. Si estas detras de un proxy corporativo, descarga el ZIP manualmente desde [la pagina oficial de Silicon Labs](https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers), extrae el contenido, y ejecuta `CP210xVCPInstaller_x64.exe` como Administrador.
+
+**La instalacion falla y quieres hacerla a mano**
+Ejecuta el script con `-KeepFiles` para que no borre la carpeta temporal, abre esa carpeta, haz click derecho sobre `slabvcp.inf` y selecciona "Instalar". Ojo: el INF del paquete se llama `slabvcp.inf`; `silabser` es el nombre del archivo `.sys`, no del `.inf`.
 
 **El instalador termina pero no aparece el puerto COM**
 Desconecta y vuelve a conectar la placa ESP32. Si aun no aparece, prueba con otro cable USB. Muchos cables son solo de carga y no tienen los pines de datos necesarios.
@@ -203,9 +255,22 @@ Pagina oficial del driver: [CP210x USB to UART Bridge VCP Drivers](https://www.s
 ```
 ESP32-Driver-Installer/
     Install-ESP32Driver.ps1    # Script principal
+    Tests/
+        Run-Tests.ps1          # Suite de tests (sin dependencias)
+        fixtures/              # Salidas capturadas de pnputil
     README.md                  # Este archivo
     LICENSE                    # Licencia MIT
 ```
+
+### Tests
+
+La suite corre sin instalar nada, sin conexion a internet y sin tocar el sistema: cada test ejercita una funcion pura o alimenta una salida de `pnputil` capturada en `Tests/fixtures`.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Tests\Run-Tests.ps1
+```
+
+Devuelve codigo de salida 0 si todo pasa, 1 si algo falla.
 
 ---
 

@@ -1,0 +1,27 @@
+Utilidad PnP de Microsoft
+
+Nombre publicado:            oem52.inf
+Nombre original:             acpi0002.inf
+Nombre del proveedor:        Microsoft
+Nombre de clase:             Dispositivos del sistema
+GUID de clase:               {4d36e97d-e325-11ce-bfc1-08002be10318}
+Versión del controlador:     21/06/2006 10.0.26100.1
+Nombre del firmante:         Microsoft Windows
+
+Nombre publicado:            oem26.inf
+Nombre original:             silabser.inf
+Nombre del proveedor:        Silicon Laboratories Inc.
+Nombre de clase:             Puertos (COM y LPT)
+GUID de clase:               {4d36e978-e325-11ce-bfc1-08002be10318}
+Versión del controlador:     10/12/2025 11.5.0.417
+Nombre del firmante:         Microsoft Windows Hardware Compatibility Publisher
+Atributos:                   Universal
+Versión de WHCP:             Desconocido
+
+Nombre publicado:            oem7.inf
+Nombre original:             nvhda.inf
+Nombre del proveedor:        NVIDIA Corporation
+Nombre de clase:             Dispositivos de sonido, vídeo y juegos
+GUID de clase:               {4d36e96c-e325-11ce-bfc1-08002be10318}
+Versión del controlador:     01/08/2024 1.4.4.0
+Nombre del firmante:         Microsoft Windows Hardware Compatibility Publisher
