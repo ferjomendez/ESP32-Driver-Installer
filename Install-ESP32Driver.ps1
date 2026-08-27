@@ -10,7 +10,7 @@
     CP2102, CP2102N, CP2104, CP2105 and CP2108.
 
     Workflow:
-      1. Check if the driver is already installed.
+      1. Check if the driver is already installed (via pnputil).
       2. Download the official ZIP from silabs.com.
       3. Extract and run the correct installer (x64 or x86).
       4. Verify the driver is now registered.
@@ -20,8 +20,10 @@
     Design goals:
       - Windows 10 / Windows 11, PowerShell 5.1+ and PowerShell 7+.
       - Single portable script. No installation. No registry modifications.
-      - Administrator rights required for driver installation.
+      - Administrator rights required; the script relaunches itself elevated.
       - Never terminates unexpectedly; every operation is guarded.
+      - Locale independent: no decision is made by matching English words in
+        the output of Windows tools.
 
 .PARAMETER Force
     Reinstall the driver even if it is already detected (also accepted
@@ -52,7 +54,7 @@
 
 .NOTES
     Name    : ESP32 Driver Installer
-    Version : 1.0.0
+    Version : 1.1.0
     Author  : ferjomendez
     License : MIT
     Source  : Silicon Labs CP210x VCP Drivers
@@ -65,6 +67,8 @@ param(
     [switch]$NoColor,
     [switch]$Ascii,
     [switch]$KeepFiles,
+    # Internal: set when the script relaunches itself elevated, to stop a UAC loop.
+    [switch]$Elevated,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ExtraArgs
 )
@@ -82,7 +86,16 @@ foreach ($arg in @($ExtraArgs)) {
         '^--?no-?color$'       { $NoColor  = $true }
         '^--?ascii$'           { $Ascii    = $true }
         '^--?keep(-?files)?$'  { $KeepFiles = $true }
-        '^--?(help|\?)$'       { Get-Help -Detailed $MyInvocation.MyCommand.Path; exit 0 }
+        '^--?(help|\?)$'       {
+            # $MyInvocation.MyCommand.Path is empty when the script was piped in
+            # rather than run from a file, and Get-Help would then fail.
+            if ($MyInvocation.MyCommand.Path) {
+                Get-Help -Detailed $MyInvocation.MyCommand.Path
+            } else {
+                Write-Host 'Usage: Install-ESP32Driver.ps1 [-Force] [-NoColor] [-Ascii] [-KeepFiles]'
+            }
+            exit 0
+        }
         default                { Write-Warning "Unknown argument ignored: $arg" }
     }
 }
@@ -90,11 +103,14 @@ foreach ($arg in @($ExtraArgs)) {
 # ============================================================================
 #  Script-wide state
 # ============================================================================
-$Script:Version   = '1.0.0'
-$Script:NoColor   = [bool]($NoColor -or $env:NO_COLOR)
-$Script:DriverUrl = 'https://www.silabs.com/documents/public/software/CP210x_Windows_Drivers.zip'
-$Script:TempDir   = Join-Path $env:TEMP 'ESP32_Driver_Install'
-$Script:ZipPath   = Join-Path $Script:TempDir 'CP210x_Windows_Drivers.zip'
+$Script:Version         = '1.1.0'
+$Script:NoColor         = [bool]($NoColor -or $env:NO_COLOR)
+$Script:DriverUrl       = 'https://www.silabs.com/documents/public/software/CP210x_Windows_Drivers.zip'
+$Script:TempDir         = Join-Path $env:TEMP 'ESP32_Driver_Install'
+$Script:ZipPath         = Join-Path $Script:TempDir 'CP210x_Windows_Drivers.zip'
+$Script:DriverEnumCache = $null
+$Script:RebootRequired  = $false
+$Script:LastInfPath     = $null
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
@@ -123,6 +139,41 @@ function Test-IsAdmin {
 function Invoke-Safe {
     param([scriptblock]$Script, $Default = $null)
     try { & $Script } catch { $Default }
+}
+
+function Invoke-SelfElevate {
+    <#
+        Relaunches this script in an elevated window, forwarding the original
+        switches. Returns $true if a new elevated process was started.
+
+        Returns $false - leaving the caller to print the manual instructions -
+        when relaunching is impossible or refused:
+          - already running as a relaunched child ($Elevated), so UAC cannot loop
+          - no script file to relaunch (piped from the web, dot-sourced)
+          - the user dismissed the UAC prompt
+    #>
+    if ($Elevated) { return $false }
+    if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { return $false }
+
+    $psExe = Invoke-Safe { (Get-Process -Id $PID).Path }
+    if ([string]::IsNullOrWhiteSpace($psExe)) { return $false }
+
+    # Start-Process joins ArgumentList with spaces without quoting, so the
+    # script path has to be quoted here or any space in it breaks the relaunch.
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-Elevated')
+    if ($Force)     { $argList += '-Force' }
+    if ($NoColor)   { $argList += '-NoColor' }
+    if ($Ascii)     { $argList += '-Ascii' }
+    if ($KeepFiles) { $argList += '-KeepFiles' }
+
+    Out-Status 'Requesting Administrator privileges ...' Yellow
+    try {
+        Start-Process -FilePath $psExe -ArgumentList $argList -Verb RunAs -ErrorAction Stop | Out-Null
+        return $true
+    } catch {
+        Out-Status 'Administrator approval was denied or cancelled.' Yellow
+        return $false
+    }
 }
 
 function Wait-Exit {
@@ -175,33 +226,172 @@ function Out-Step {
 }
 
 # ============================================================================
-#  Driver detection
+#  Installer result decoding
 # ============================================================================
 
-function Test-CP210xInstalled {
-    <# Returns $true if any CP210x driver is already registered. #>
+function Convert-DpinstExitCode {
+    <#
+        CP210xVCPInstaller_x64.exe / _x86.exe are Microsoft DPInst 2.1
+        (Driver Package Installer). DPInst does not return 0 on success - it
+        returns a bitmask:
 
-    # Method 1: Check PnP signed drivers.
+            bits  0-6   packages that could not be installed
+            bit   7     a reboot is required
+            bits  8-14  packages copied to the driver store
+            bits 16-22  packages installed on devices
+            bit  31     an error occurred
+
+        Exit code 0 therefore means "nothing was installed", not "success".
+    #>
+    param([Parameter(Mandatory = $true)][long]$ExitCode)
+
+    # Start-Process reports ExitCode as Int32, so 0x80000000 arrives negative.
+    $u = [uint32]([int64]$ExitCode -band 0xFFFFFFFFL)
+
+    $failed    = [int]($u -band 0x7F)
+    $reboot    = [bool]($u -band 0x80)
+    $copied    = [int](($u -shr 8)  -band 0x7F)
+    $installed = [int](($u -shr 16) -band 0x7F)
+    $errorBit  = [bool](($u -shr 31) -band 1)
+
+    $status = if ($errorBit -or $failed -gt 0) {
+        'Failure'
+    } elseif ($installed -gt 0 -or $copied -gt 0) {
+        'Success'
+    } else {
+        'NothingInstalled'
+    }
+
+    [pscustomobject]@{
+        Status             = $status
+        RebootRequired     = $reboot
+        FailedPackages     = $failed
+        CopiedToStore      = $copied
+        InstalledOnDevices = $installed
+        CodeHex            = '0x{0:X8}' -f $u
+    }
+}
+
+function Find-DriverInf {
+    <#
+        Returns the CP210x INF inside an extracted package, or $null.
+
+        The official ZIP ships slabvcp.inf - silabser is the name of the .sys,
+        not the .inf. Rather than hard-coding either name, pick the INF whose
+        body identifies a CP210x driver, so a future rename of the package
+        cannot break the fallback again.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $candidates = Get-ChildItem -Path $Path -Filter '*.inf' -Recurse -File -ErrorAction SilentlyContinue
+    foreach ($inf in $candidates) {
+        $body = Invoke-Safe { Get-Content -Path $inf.FullName -Raw -ErrorAction Stop }
+        if ($body -and $body -match 'CP210x|silabser') { return $inf }
+    }
+    return $null
+}
+
+# ============================================================================
+#  Driver detection
+#
+#  pnputil /enum-drivers is the source of truth here, not Win32_PnPSignedDriver:
+#  that WMI class only lists drivers bound to devices that are currently
+#  present, so it reports "not installed" whenever the board is unplugged.
+# ============================================================================
+
+function Get-CP210xEnumBlocks {
+    <#
+        Splits pnputil /enum-drivers output into per-driver blocks and returns
+        those belonging to a CP210x driver.
+
+        Matching is anchored on INF file names, the provider value and the Ports
+        class GUID - never on field labels. pnputil translates its labels
+        ("Driver Version" -> "Version del controlador") but not the data, so
+        label matching silently breaks on non-English Windows.
+    #>
+    param([string]$EnumText)
+
+    if ([string]::IsNullOrWhiteSpace($EnumText)) { return @() }
+
+    $blocks = ($EnumText -replace "`r`n", "`n") -split "`n{2,}"
+    return @($blocks | Where-Object {
+        ($_ -match '\b(?:slabvcp|silabser)\.inf\b') -or
+        ($_ -match 'Silicon Lab' -and $_ -match '4d36e978-e325-11ce-bfc1-08002be10318')
+    })
+}
+
+function Test-CP210xInstalledFromEnum {
+    <# Returns $true if pnputil output shows a CP210x driver in the driver store. #>
+    param([string]$EnumText)
+    return (@(Get-CP210xEnumBlocks -EnumText $EnumText).Count -gt 0)
+}
+
+function Get-CP210xVersionFromEnum {
+    <#
+        Returns the newest installed CP210x driver version, or $null.
+        The version line's label is localized but its value is not, so the
+        four-part number is read positionally from within the matching block.
+    #>
+    param([string]$EnumText)
+
+    $found = New-Object System.Collections.ArrayList
+    foreach ($block in (Get-CP210xEnumBlocks -EnumText $EnumText)) {
+        foreach ($m in [regex]::Matches($block, '\b\d+\.\d+\.\d+\.\d+\b')) {
+            $v = $null
+            if ([version]::TryParse($m.Value, [ref]$v)) { [void]$found.Add($v) }
+        }
+    }
+    if ($found.Count -eq 0) { return $null }
+    return ($found | Sort-Object -Descending | Select-Object -First 1).ToString()
+}
+
+function Get-DriverStoreEnum {
+    <#
+        Returns the raw text of pnputil /enum-drivers, cached for the run.
+
+        Cached because the previous implementation queried Win32_PnPSignedDriver
+        up to four times at ~8s each - about 33s of apparent freeze with no
+        output. pnputil answers in well under a second.
+
+        Call Reset-DriverStoreCache after installing to force a fresh read.
+    #>
+    if ($null -ne $Script:DriverEnumCache) { return $Script:DriverEnumCache }
+
+    $Script:DriverEnumCache = Invoke-Safe {
+        # No 2>&1 here: with $ErrorActionPreference = 'Stop', redirecting a
+        # native command's stderr turns each line into an ErrorRecord and
+        # aborts the script.
+        (& pnputil.exe /enum-drivers) -join "`n"
+    } ''
+
+    return $Script:DriverEnumCache
+}
+
+function Reset-DriverStoreCache {
+    $Script:DriverEnumCache = $null
+}
+
+function Test-CP210xInstalled {
+    <# Returns $true if any CP210x driver is registered in the driver store. #>
+
+    if (Test-CP210xInstalledFromEnum -EnumText (Get-DriverStoreEnum)) { return $true }
+
+    # Secondary signal, kept for the rare case where pnputil is unavailable.
+    # On its own this is unreliable: Win32_PnPSignedDriver only lists drivers
+    # bound to devices that are currently present.
     $pnp = Invoke-Safe {
         Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
             Where-Object { $_.DeviceName -match 'CP210' -or $_.InfName -match 'silabser' }
     }
-    if ($pnp) { return $true }
-
-    # Method 2: Check the driver store for the INF.
-    $infStore = Invoke-Safe {
-        Get-ChildItem "$env:SystemRoot\INF" -Filter 'oem*.inf' -ErrorAction SilentlyContinue |
-            Where-Object {
-                (Get-Content $_.FullName -TotalCount 30 -ErrorAction SilentlyContinue) -match 'silabser|CP210x'
-            }
-    }
-    if ($infStore) { return $true }
-
-    return $false
+    return [bool]$pnp
 }
 
 function Get-CP210xDriverVersion {
-    <# Returns the installed driver version string or $null. #>
+    <# Returns the newest installed driver version string, or $null. #>
+
+    $version = Get-CP210xVersionFromEnum -EnumText (Get-DriverStoreEnum)
+    if ($version) { return $version }
+
     $drv = Invoke-Safe {
         Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop |
             Where-Object { $_.DeviceName -match 'CP210' -or $_.InfName -match 'silabser' } |
@@ -292,11 +482,34 @@ function Install-CP210xDriver {
         try {
             $proc = Start-Process -FilePath $installer.FullName -ArgumentList '/S' `
                 -Wait -PassThru -ErrorAction Stop
-            if ($proc.ExitCode -eq 0) {
-                Out-Status 'Installer completed successfully.' Green
-                return $true
-            } else {
-                Out-Status "Installer exited with code $($proc.ExitCode). Trying INF method ..." Yellow
+
+            # The EXE is Microsoft DPInst, which returns a bitmask rather than
+            # 0-on-success. See Convert-DpinstExitCode.
+            $r = Convert-DpinstExitCode -ExitCode $proc.ExitCode
+            Out-KV 'Installer result' ('{0} ({1})' -f $r.Status, $r.CodeHex)
+
+            switch ($r.Status) {
+                'Success' {
+                    Out-Status 'Installer completed successfully.' Green
+                    if ($r.InstalledOnDevices -gt 0) {
+                        Out-KV 'Installed on devices' $r.InstalledOnDevices Green
+                    }
+                    if ($r.CopiedToStore -gt 0) {
+                        Out-KV 'Copied to driver store' $r.CopiedToStore Green
+                    }
+                    $Script:RebootRequired = $r.RebootRequired
+                    if ($r.RebootRequired) {
+                        Out-Status 'A restart is required to finish the installation.' Yellow
+                    }
+                    Reset-DriverStoreCache
+                    return $true
+                }
+                'NothingInstalled' {
+                    Out-Status 'Installer reported nothing to install. Trying INF method ...' Yellow
+                }
+                default {
+                    Out-Status "Installer reported $($r.FailedPackages) failed package(s). Trying INF method ..." Yellow
+                }
             }
         } catch {
             Out-Status "EXE installer failed: $($_.Exception.Message)" Yellow
@@ -304,28 +517,42 @@ function Install-CP210xDriver {
         }
     }
 
-    # Fallback: install via INF.
-    $inf = Get-ChildItem -Path $ExtractPath -Filter 'silabser.inf' -Recurse -ErrorAction SilentlyContinue |
-        Select-Object -First 1
+    # Fallback: install via INF. The package ships slabvcp.inf, so the INF is
+    # located by content rather than by a hard-coded file name.
+    $inf = Find-DriverInf -Path $ExtractPath
 
     if (-not $inf) {
-        Out-Status 'Could not find silabser.inf in the package.' Red
+        Out-Status 'Could not find a CP210x INF in the package.' Red
         return $false
     }
 
+    $Script:LastInfPath = $inf.FullName
     Out-KV 'INF path' $inf.FullName
     Out-Status 'Installing via pnputil ...'
 
     try {
-        $result = & pnputil.exe /add-driver $inf.FullName /install 2>&1
-        $resultText = $result -join "`n"
-        if ($LASTEXITCODE -eq 0 -or $resultText -match 'successfully') {
+        # No 2>&1: under $ErrorActionPreference = 'Stop' that turns native
+        # stderr into a terminating error. Success is decided by the exit code
+        # and by re-reading the driver store - never by matching the word
+        # "successfully", which is localized.
+        $result = & pnputil.exe /add-driver $inf.FullName /install
+        $code   = $LASTEXITCODE
+        Reset-DriverStoreCache
+
+        # 3010 = ERROR_SUCCESS_REBOOT_REQUIRED.
+        if ($code -eq 3010) { $Script:RebootRequired = $true }
+
+        if ($code -eq 0 -or $code -eq 3010 -or (Test-CP210xInstalled)) {
             Out-Status 'INF driver installed successfully.' Green
+            if ($Script:RebootRequired) {
+                Out-Status 'A restart is required to finish the installation.' Yellow
+            }
             return $true
-        } else {
-            Out-Status "pnputil output: $resultText" Red
-            return $false
         }
+
+        Out-KV 'pnputil exit code' $code Red
+        Out-Status "pnputil output: $($result -join ' ')" Red
+        return $false
     } catch {
         Out-Status "INF install failed: $($_.Exception.Message)" Red
         return $false
@@ -384,6 +611,14 @@ function Invoke-ESP32DriverInstaller {
     Out-Step 1 $totalSteps 'Checking privileges'
 
     if (-not (Test-IsAdmin)) {
+        Out-Status 'Not running as Administrator.' Yellow
+
+        if (Invoke-SelfElevate) {
+            Out-Status 'Continuing in a new Administrator window.' Green
+            $stopwatch.Stop()
+            exit 0
+        }
+
         Out-Status 'This script requires Administrator privileges to install drivers.' Red
         Out-Status 'Right-click PowerShell and select "Run as administrator", then try again.' Yellow
         $stopwatch.Stop()
@@ -406,7 +641,7 @@ function Invoke-ESP32DriverInstaller {
         if ($ports.Count -gt 0) {
             Out-KV 'ESP32 detected on' ($ports -join ', ') Green
         } else {
-            Out-Status 'No ESP32 device currently connected (this is normal if unplugged).' DarkGray
+            Out-Status 'No CP210x device currently connected (this is normal if unplugged).' DarkGray
         }
 
         Out-Line ''
@@ -453,10 +688,12 @@ function Invoke-ESP32DriverInstaller {
     if (-not $installed) {
         Out-Line ''
         Out-Status 'Automatic installation failed.' Red
+        $infName = if ($Script:LastInfPath) { Split-Path -Leaf $Script:LastInfPath } else { 'slabvcp.inf' }
+        $arch    = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
         Out-Status 'You can try manually:' Yellow
         Out-Status "  1. Open the folder: $extractPath" White
-        Out-Status '  2. Right-click silabser.inf and select "Install"' White
-        Out-Status '  3. Or run CP210xVCPInstaller_x64.exe as Administrator' White
+        Out-Status "  2. Right-click $infName and select `"Install`"" White
+        Out-Status "  3. Or run CP210xVCPInstaller_$arch.exe as Administrator" White
         if (-not $KeepFiles) {
             Out-Status ''
             Out-Status 'Keeping temp files for manual install.' Yellow
@@ -468,8 +705,10 @@ function Invoke-ESP32DriverInstaller {
     # ---- Step 5: Verify -----------------------------------------------------
     Out-Step 5 $totalSteps 'Verifying installation'
 
-    # Give Windows a moment to register the driver.
+    # Give Windows a moment to register the driver, then read the store again
+    # rather than trusting the pre-install snapshot.
     Start-Sleep -Seconds 2
+    Reset-DriverStoreCache
 
     $verified = Test-CP210xInstalled
     $newVersion = Get-CP210xDriverVersion
@@ -486,7 +725,7 @@ function Invoke-ESP32DriverInstaller {
     if ($ports.Count -gt 0) {
         Out-KV 'ESP32 detected on' ($ports -join ', ') Green
     } else {
-        Out-Status 'No ESP32 device currently connected. Plug in your board to verify.' DarkGray
+        Out-Status 'No CP210x device currently connected. Plug in your board to verify.' DarkGray
     }
 
     # ---- Cleanup ------------------------------------------------------------
@@ -499,19 +738,25 @@ function Invoke-ESP32DriverInstaller {
     Out-Line ($Script:G.TL + ($Script:G.H * $inner) + $Script:G.TR) DarkCyan
     $statusText = if ($verified) { 'INSTALLATION COMPLETE' } else { 'INSTALLATION FINISHED (VERIFY MANUALLY)' }
     Out-Line ($Script:G.V + ('  ' + $statusText).PadRight($inner) + $Script:G.V) Green
+    if ($Script:RebootRequired) {
+        Out-Line ($Script:G.V + '  Restart required to finish'.PadRight($inner) + $Script:G.V) Yellow
+    }
     Out-Line ($Script:G.V + ('  Time: ' + [math]::Round($stopwatch.Elapsed.TotalSeconds, 1) + 's').PadRight($inner) + $Script:G.V) DarkCyan
     Out-Line ($Script:G.BL + ($Script:G.H * $inner) + $Script:G.BR) DarkCyan
     Out-Line ''
 }
 
-try {
-    Invoke-ESP32DriverInstaller
-    Wait-Exit
-    exit 0
-} catch {
-    Write-Host ''
-    Write-Host "ESP32 Driver Installer encountered an unexpected error: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
-    Wait-Exit
-    exit 1
+# When dot-sourced by the test harness, stop here and expose the functions only.
+if (-not $env:ESP32_DRIVER_TEST_MODE) {
+    try {
+        Invoke-ESP32DriverInstaller
+        Wait-Exit
+        exit 0
+    } catch {
+        Write-Host ''
+        Write-Host "ESP32 Driver Installer encountered an unexpected error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+        Wait-Exit
+        exit 1
+    }
 }
